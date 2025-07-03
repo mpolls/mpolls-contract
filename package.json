@@ -6,6 +6,9 @@
     "scripts": {
         "test": "asp --summary",
         "build": "massa-as-compile",
+        "create-poll": "tsx test/create-poll.js",
+        "fund-contract": "tsx test/fund-contract.js",
+        "deploy-contract": "tsx test/deploy-contract.js",
         "clean": "rimraf build",
         "deploy": "npm run build && tsx src/deploy.ts",
         "hello": "tsx src/hello.ts",
