@@ -7,6 +7,7 @@
         "test": "asp --summary",
         "build": "massa-as-compile",
         "create-poll": "tsx test/create-poll.js",
+        "get-polls": "tsx test/get-polls.js",
         "fund-contract": "tsx test/fund-contract.js",
         "deploy-contract": "tsx test/deploy-contract.js",
         "clean": "rimraf build",
