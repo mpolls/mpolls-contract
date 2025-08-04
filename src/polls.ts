@@ -3,7 +3,7 @@ import { Args } from "@massalabs/massa-as-sdk";
 
 // Configuration
 const RPC_ENDPOINT = "https://test.massa.net/api/v2";
-const CONTRACT_ADDRESS = ""; // Will be set after deployment
+const CONTRACT_ADDRESS = "AS1S3n9oCcsQmzPLKydnqZAFyhCyVhvaThnC11f7xyMzKDEkjkX6"; // Will be set after deployment
 
 // Poll interface for TypeScript
 interface Poll {

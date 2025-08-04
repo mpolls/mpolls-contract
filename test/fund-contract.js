@@ -8,7 +8,7 @@ import {
   JsonRpcProvider,
 } from '@massalabs/massa-web3';
 
-const CONTRACT_ADDRESS = 'AS1S3n9oCcsQmzPLKydnqZAFyhCyVhvaThnC11f7xyMzKDEkjkX6';
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 
 async function fundContract() {
   console.log('💰 Funding Contract with MASSA tokens');
