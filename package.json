@@ -8,6 +8,7 @@
         "build": "massa-as-compile",
         "create-poll": "tsx test/create-poll.js",
         "get-polls": "tsx test/get-polls.js",
+        "list-polls": "tsx test/list-all-polls.js",
         "test-create-retrieve": "tsx test/test-poll-create-retrieve.js",
         "test-retrieve": "tsx test/test-poll-retrieve.js",
         "fund-contract": "tsx test/fund-contract.js",
