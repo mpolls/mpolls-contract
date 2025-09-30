@@ -5,8 +5,11 @@ import {
 } from '@massalabs/massa-web3';
 import 'dotenv/config';
 
-// Paste the address of the deployed contract here
-const CONTRACT_ADDR = 'AS12N5DvTVwvaLbaniMgDJqKwJ3uXBGwzzGuB1f6fjeSx3nhhahTE';
+// Read contract address from .env
+const CONTRACT_ADDR = process.env.CONTRACT_ADDRESS;
+if (!CONTRACT_ADDR) {
+  throw new Error('CONTRACT_ADDRESS not found in .env');
+}
 
 // Here we only use the read method of the contract so we don't need an account
 // provider will be a JsonRpcPublicProvider instance

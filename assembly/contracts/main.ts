@@ -385,7 +385,11 @@ export function createPoll(args: StaticArray<u8>): void {
     }
   }
 
+  // Emit creation notification
   generateEvent(`Poll created with ID: ${newPollId} by ${Context.caller().toString()}${projectId > 0 ? ` in project ${projectId}` : ""}`);
+
+  // Emit full poll data for immediate retrieval (similar to getAllPolls)
+  generateEvent(`Poll ${newPollId}: ${poll.serialize()}`);
 }
 
 /**
