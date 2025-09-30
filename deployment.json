@@ -1,5 +1,5 @@
 {
-  "address": "AS12EwdseFQW75e3FagAKJ9wTULr3Lo6V7re7BEBKHVFzKugQNG4r",
+  "address": "AS12pcfRH3CtAhXiAnpdf2MVPkbKtiiLGxewZAdojFhEYmSUMGtLg",
   "deployer": {
     "serializer": {},
     "versioner": {},
@@ -42,8 +42,11 @@
     },
     "isEOA": true
   },
-  "deployedAt": "2025-09-30T11:22:38.586Z",
+  "deployedAt": "2025-09-30T14:27:10.563Z",
   "network": "buildnet",
-  "version": "1.0.0",
-  "upgradeable": true
+  "version": "1.1.0",
+  "upgradeable": true,
+  "previousVersions": [
+    "AS1mJqATphmCMK43m1kStnjyxs6tTu9yChu8wZW8DEHHsm6WXjnL"
+  ]
 }
