@@ -1,9 +1,13 @@
+import 'dotenv/config';
 import { Client, WalletClient, IAccount, IEvent } from "@massalabs/massa-web3";
 import { Args } from "@massalabs/massa-as-sdk";
 
 // Configuration
 const RPC_ENDPOINT = "https://test.massa.net/api/v2";
-const CONTRACT_ADDRESS = "AS1S3n9oCcsQmzPLKydnqZAFyhCyVhvaThnC11f7xyMzKDEkjkX6"; // Will be set after deployment
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || ""; // Read from .env
+if (!CONTRACT_ADDRESS) {
+  console.warn("⚠️  CONTRACT_ADDRESS not found in .env. Please set it before using this module.");
+}
 
 // Poll interface for TypeScript
 interface Poll {

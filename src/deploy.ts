@@ -12,17 +12,24 @@ const account = await Account.fromEnv();
 const provider = JsonRpcProvider.buildnet(account);
 
 console.log('Deploying contract...');
+console.log(`Account: ${account.address}`);
 
 const byteCode = getScByteCode('build', 'main.wasm');
+console.log(`Bytecode size: ${byteCode.length} bytes`);
 
-const name = 'Massa';
-const constructorArgs = new Args().addString(name);
+// Main contract constructor takes no arguments
+const constructorArgs = new Args();
+
+console.log('Starting deployment...');
 
 const contract = await SmartContract.deploy(
   provider,
   byteCode,
   constructorArgs,
-  { coins: Mas.fromString('0.01') },
+  {
+    coins: Mas.fromString('0.1'),
+    fee: Mas.fromString('0.01')
+  },
 );
 
 console.log('Contract deployed at:', contract.address);
