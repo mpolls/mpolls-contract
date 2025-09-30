@@ -23,7 +23,7 @@ async function main() {
 
   console.log('📋 Deployment Configuration:');
   console.log(`   Network: Massa Buildnet`);
-  console.log(`   Deployer: ${account.address()}`);
+  console.log(`   Deployer: ${account.address}`);
   console.log(`   Balance: Checking...\n`);
 
   // Get bytecode
@@ -51,7 +51,7 @@ async function main() {
   // Save contract address to file
   const deploymentInfo = {
     address: contract.address,
-    deployer: account.address(),
+    deployer: account.address,
     deployedAt: new Date().toISOString(),
     network: 'buildnet',
     version: '1.0.0',

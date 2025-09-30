@@ -57,7 +57,7 @@ async function main() {
 
   console.log('📋 Upgrade Configuration:');
   console.log(`   Network: Massa Buildnet`);
-  console.log(`   Deployer: ${account.address()}`);
+  console.log(`   Deployer: ${account.address}`);
 
   // Check if deployer is the admin of the old contract
   if (previousDeployment) {
@@ -107,7 +107,7 @@ async function main() {
 
   const deploymentInfo: DeploymentInfo = {
     address: newContract.address,
-    deployer: account.address(),
+    deployer: account.address,
     deployedAt: new Date().toISOString(),
     network: 'buildnet',
     version: newVersion,
@@ -193,7 +193,7 @@ async function main() {
     to: newContract.address,
     version: newVersion,
     timestamp: new Date().toISOString(),
-    deployer: account.address()
+    deployer: account.address
   });
 
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2));

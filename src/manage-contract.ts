@@ -45,7 +45,7 @@ async function pauseContract() {
   const contractAddress = await getContractAddress();
 
   console.log(`Contract: ${contractAddress}`);
-  console.log(`Admin: ${account.address()}\n`);
+  console.log(`Admin: ${account.address}\n`);
 
   const result = await account.callSC({
     target: contractAddress,
@@ -67,7 +67,7 @@ async function unpauseContract() {
   const contractAddress = await getContractAddress();
 
   console.log(`Contract: ${contractAddress}`);
-  console.log(`Admin: ${account.address()}\n`);
+  console.log(`Admin: ${account.address}\n`);
 
   const result = await account.callSC({
     target: contractAddress,
@@ -119,7 +119,7 @@ async function transferAdmin(newAdmin: string) {
   const contractAddress = await getContractAddress();
 
   console.log(`Contract: ${contractAddress}`);
-  console.log(`Current Admin: ${account.address()}`);
+  console.log(`Current Admin: ${account.address}`);
   console.log(`New Admin: ${newAdmin}\n`);
 
   const args = new Args().addString(newAdmin);
