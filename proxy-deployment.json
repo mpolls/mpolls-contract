@@ -1,5 +1,6 @@
 {
-  "address": "AS12pcfRH3CtAhXiAnpdf2MVPkbKtiiLGxewZAdojFhEYmSUMGtLg",
+  "proxyAddress": "AS12AaLyN59MpFBAGccUPUcAXoZBfVc2o7hMDwndP51iVU72XJ3iG",
+  "implementationAddress": "AS145xz7jcRfdJaxfJyWSgP42JURFVKD2mrhzRcUVeyc385BE1Ct",
   "deployer": {
     "serializer": {},
     "versioner": {},
@@ -42,11 +43,7 @@
     },
     "isEOA": true
   },
-  "deployedAt": "2025-09-30T14:27:10.563Z",
+  "deployedAt": "2025-09-30T14:55:11.375Z",
   "network": "buildnet",
-  "version": "1.1.0",
-  "upgradeable": true,
-  "previousVersions": [
-    "AS1mJqATphmCMK43m1kStnjyxs6tTu9yChu8wZW8DEHHsm6WXjnL"
-  ]
+  "version": "1.0.0"
 }

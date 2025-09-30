@@ -638,7 +638,11 @@ export function createProject(args: StaticArray<u8>): void {
   // Update project counter
   Storage.set(PROJECT_COUNTER_KEY, newProjectId.toString());
 
+  // Emit creation notification
   generateEvent(`Project created with ID: ${newProjectId} by ${Context.caller().toString()}`);
+
+  // Emit full project data for immediate retrieval
+  generateEvent(`Project ${newProjectId}: ${project.serialize()}`);
 }
 
 /**
