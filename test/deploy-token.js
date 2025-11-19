@@ -41,13 +41,15 @@ async function deployToken() {
     console.log('⏳ Deploying token contract to blockchain...');
 
     // Deploy the contract
+    // Note: coins parameter is transferred to the contract for storage costs
     const contract = await SmartContract.deploy(
       provider,
       byteCode,
       constructorArgs,
       {
-        coins: Mas.fromString('0.01'),
-        fee: Mas.fromString('0.01')
+        coins: Mas.fromString('0.1'), // Send coins to contract for storage costs
+        fee: Mas.fromString('0.01'),
+        maxGas: BigInt(2000000000)
       },
     );
 

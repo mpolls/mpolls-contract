@@ -55,6 +55,12 @@ enum DistributionType {
   AUTONOMOUS = 2
 }
 
+// Reward token type enum
+enum RewardTokenType {
+  NATIVE_MASSA = 0,  // Rewards paid in native MASSA tokens
+  CUSTOM_TOKEN = 1   // Rewards paid in MPOLLS custom token
+}
+
 // Project structure
 class Project {
   id: u64;
@@ -137,6 +143,9 @@ class Poll {
   fundingGoal: u64; // Target amount for community-funded polls
   treasuryApproved: boolean; // Approval status for treasury-funded polls
   rewardsDistributed: boolean; // Whether rewards have been distributed
+  rewardTokenType: RewardTokenType; // Type of token used for rewards
+  voteRewardAmount: u64; // Custom reward amount per vote
+  createPollRewardAmount: u64; // Reward for creating the poll
 
   constructor(
     id: u64,
@@ -152,7 +161,10 @@ class Poll {
     distributionMode: DistributionMode = DistributionMode.EQUAL_SPLIT,
     distributionType: DistributionType = DistributionType.MANUAL_PULL,
     fixedRewardAmount: u64 = 0,
-    fundingGoal: u64 = 0
+    fundingGoal: u64 = 0,
+    rewardTokenType: RewardTokenType = RewardTokenType.CUSTOM_TOKEN,
+    voteRewardAmount: u64 = 0,
+    createPollRewardAmount: u64 = 0
   ) {
     this.id = id;
     this.title = title;
@@ -172,13 +184,16 @@ class Poll {
     this.fundingGoal = fundingGoal;
     this.treasuryApproved = fundingType !== FundingType.TREASURY_FUNDED;
     this.rewardsDistributed = false;
+    this.rewardTokenType = rewardTokenType;
+    this.voteRewardAmount = voteRewardAmount;
+    this.createPollRewardAmount = createPollRewardAmount;
   }
 
   // Serialize poll to storage format
   serialize(): string {
     const optionsStr = this.options.join("||");
     const votesStr = this.voteCount.map<string>(v => v.toString()).join(",");
-    return `${this.id}|${this.title}|${this.description}|${optionsStr}|${this.creator}|${this.startTime}|${this.endTime}|${this.status}|${votesStr}|${this.projectId}|${this.rewardPool}|${this.fundingType}|${this.distributionMode}|${this.distributionType}|${this.fixedRewardAmount}|${this.fundingGoal}|${this.treasuryApproved}|${this.rewardsDistributed}`;
+    return `${this.id}|${this.title}|${this.description}|${optionsStr}|${this.creator}|${this.startTime}|${this.endTime}|${this.status}|${votesStr}|${this.projectId}|${this.rewardPool}|${this.fundingType}|${this.distributionMode}|${this.distributionType}|${this.fixedRewardAmount}|${this.fundingGoal}|${this.treasuryApproved}|${this.rewardsDistributed}|${this.rewardTokenType}|${this.voteRewardAmount}|${this.createPollRewardAmount}`;
   }
 
   // Deserialize poll from storage format
@@ -196,6 +211,9 @@ class Poll {
     const distributionType = parts.length > 13 && parts[13] ? (u8.parse(parts[13]) as DistributionType) : DistributionType.MANUAL_PULL;
     const fixedRewardAmount = parts.length > 14 && parts[14] ? u64.parse(parts[14]) : 0;
     const fundingGoal = parts.length > 15 && parts[15] ? u64.parse(parts[15]) : 0;
+    const rewardTokenType = parts.length > 18 && parts[18] ? (u8.parse(parts[18]) as RewardTokenType) : RewardTokenType.CUSTOM_TOKEN;
+    const voteRewardAmount = parts.length > 19 && parts[19] ? u64.parse(parts[19]) : 0;
+    const createPollRewardAmount = parts.length > 20 && parts[20] ? u64.parse(parts[20]) : 0;
 
     const poll = new Poll(
       u64.parse(parts[0]), // id
@@ -211,7 +229,10 @@ class Poll {
       distributionMode,
       distributionType,
       fixedRewardAmount,
-      fundingGoal
+      fundingGoal,
+      rewardTokenType,
+      voteRewardAmount,
+      createPollRewardAmount
     );
 
     poll.status = u8.parse(parts[7]) as PollStatus; // status
@@ -795,6 +816,25 @@ export function createPoll(args: StaticArray<u8>): void {
     fundingGoal = fundingGoalResult.unwrap();
   }
 
+  // New reward token parameters (with defaults)
+  let rewardTokenType = RewardTokenType.CUSTOM_TOKEN;
+  const rewardTokenTypeResult = argsObj.nextU8();
+  if (!rewardTokenTypeResult.isErr()) {
+    rewardTokenType = rewardTokenTypeResult.unwrap() as RewardTokenType;
+  }
+
+  let voteRewardAmount: u64 = 0;
+  const voteRewardResult = argsObj.nextU64();
+  if (!voteRewardResult.isErr()) {
+    voteRewardAmount = voteRewardResult.unwrap();
+  }
+
+  let createPollRewardAmount: u64 = 0;
+  const createRewardResult = argsObj.nextU64();
+  if (!createRewardResult.isErr()) {
+    createPollRewardAmount = createRewardResult.unwrap();
+  }
+
   // Validate inputs
   assert(title.length > 0, "Title cannot be empty");
   assert(description.length > 0, "Description cannot be empty");
@@ -844,7 +884,10 @@ export function createPoll(args: StaticArray<u8>): void {
     distributionMode,
     distributionType,
     fixedRewardAmount,
-    fundingGoal
+    fundingGoal,
+    rewardTokenType,
+    voteRewardAmount,
+    createPollRewardAmount
   );
 
   // Store poll
@@ -871,7 +914,19 @@ export function createPoll(args: StaticArray<u8>): void {
   // Emit full poll data for immediate retrieval (similar to getAllPolls)
   generateEvent(`Poll ${newPollId}: ${poll.serialize()}`);
 
-  // Note: Token rewards removed - keeping tokens for governance only
+  // Distribute create poll reward if configured
+  if (createPollRewardAmount > 0) {
+    if (rewardTokenType === RewardTokenType.CUSTOM_TOKEN) {
+      // Mint custom tokens as reward
+      mintReward(Context.caller().toString(), createPollRewardAmount);
+      generateEvent(`Creator ${Context.caller().toString()} earned ${createPollRewardAmount} MPOLLS tokens for creating poll ${newPollId}`);
+    } else {
+      // Transfer native MASSA tokens from poll's reward pool
+      // Note: For NATIVE_MASSA rewards, the creator should have funded the poll with enough MASSA
+      // and the reward will be distributed from the pool
+      generateEvent(`Creator ${Context.caller().toString()} will receive ${createPollRewardAmount} nanoMASSA from pool for creating poll ${newPollId}`);
+    }
+  }
 }
 
 /**
@@ -913,7 +968,24 @@ export function vote(args: StaticArray<u8>): void {
 
   generateEvent(`Vote cast by ${Context.caller().toString()} for option ${optionIndex} in poll ${pollId}`);
 
-  // Note: Token rewards removed - keeping tokens for governance only
+  // Distribute vote reward if configured
+  if (poll.voteRewardAmount > 0) {
+    if (poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN) {
+      // Mint custom tokens as reward
+      mintReward(Context.caller().toString(), poll.voteRewardAmount);
+      generateEvent(`Voter ${Context.caller().toString()} earned ${poll.voteRewardAmount} MPOLLS tokens for voting on poll ${pollId}`);
+    } else {
+      // Transfer native MASSA tokens from poll's reward pool
+      if (poll.rewardPool >= poll.voteRewardAmount) {
+        poll.rewardPool -= poll.voteRewardAmount;
+        Storage.set(pollKey, poll.serialize());
+        call(new Address(Context.caller().toString()), "", new Args(), poll.voteRewardAmount);
+        generateEvent(`Voter ${Context.caller().toString()} earned ${poll.voteRewardAmount} nanoMASSA from pool for voting on poll ${pollId}`);
+      } else {
+        generateEvent(`Insufficient reward pool balance for voter ${Context.caller().toString()} on poll ${pollId}`);
+      }
+    }
+  }
 }
 
 // ================= FUNDING FUNCTIONS =================

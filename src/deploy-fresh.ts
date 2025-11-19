@@ -58,8 +58,8 @@ async function deployFreshContract() {
       provider,
       byteCode,
       constructorArgs,
-      { 
-        coins: Mas.fromString('0.01'),
+      {
+        coins: Mas.fromString('0.1'), // Increased for storage costs
         fee: Mas.fromString('0.01')
       },
     );
