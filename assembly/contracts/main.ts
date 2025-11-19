@@ -22,6 +22,11 @@ const VOTE_REWARD_AMOUNT_KEY = "vote_reward_amount";
 const CREATE_POLL_REWARD_AMOUNT_KEY = "create_poll_reward_amount";
 const REWARDS_ENABLED_KEY = "rewards_enabled";
 
+// Autonomous SC keys
+const AUTONOMOUS_ENABLED_KEY = "autonomous_enabled";
+const LAST_AUTONOMOUS_RUN_KEY = "last_autonomous_run";
+const AUTONOMOUS_INTERVAL_KEY = "autonomous_interval"; // In seconds
+
 // Poll status enum
 enum PollStatus {
   ACTIVE = 0,
@@ -230,7 +235,7 @@ class Poll {
 
   // Check if poll is currently active
   isActive(): boolean {
-    const currentTime = Context.timestamp(); // Returns seconds since epoch
+    const currentTime = Context.timestamp(); // Returns MILLISECONDS since epoch
     // Both startTime and endTime are stored in seconds, so compare directly
     return this.status === PollStatus.ACTIVE &&
            currentTime >= this.startTime &&
@@ -280,7 +285,12 @@ export function constructor(_: StaticArray<u8>): void {
   Storage.set(VOTE_REWARD_AMOUNT_KEY, "10000000000"); // 10 MPOLLS (with 9 decimals)
   Storage.set(CREATE_POLL_REWARD_AMOUNT_KEY, "50000000000"); // 50 MPOLLS (with 9 decimals)
 
-  generateEvent("Decentralized Polls contract deployed successfully with project support! Version 1.0.0");
+  // Initialize autonomous SC (disabled by default)
+  Storage.set(AUTONOMOUS_ENABLED_KEY, "false");
+  Storage.set(AUTONOMOUS_INTERVAL_KEY, "3600"); // 1 hour default
+  Storage.set(LAST_AUTONOMOUS_RUN_KEY, "0");
+
+  generateEvent("Decentralized Polls contract deployed successfully with autonomous SC support! Version 1.0.0");
 }
 
 // ================= ADMIN & UPGRADE FUNCTIONS =================
@@ -513,6 +523,219 @@ function mintReward(recipient: string, amount: u64): void {
   call(tokenAddress, "mint", mintArgs, 0);
 }
 
+// ================= AUTONOMOUS SC FUNCTIONS =================
+
+/**
+ * Enable autonomous smart contract execution (only admin)
+ */
+export function enableAutonomous(): void {
+  onlyAdmin();
+  Storage.set(AUTONOMOUS_ENABLED_KEY, "true");
+  generateEvent("Autonomous SC execution enabled");
+}
+
+/**
+ * Disable autonomous smart contract execution (only admin)
+ */
+export function disableAutonomous(): void {
+  onlyAdmin();
+  Storage.set(AUTONOMOUS_ENABLED_KEY, "false");
+  generateEvent("Autonomous SC execution disabled");
+}
+
+/**
+ * Check if autonomous execution is enabled
+ */
+export function isAutonomousEnabled(): void {
+  const enabled = Storage.get(AUTONOMOUS_ENABLED_KEY);
+  const isEnabled = enabled !== null && enabled === "true";
+  generateEvent(`Autonomous SC enabled: ${isEnabled}`);
+}
+
+/**
+ * Set autonomous execution interval in seconds (only admin)
+ * @param args - Serialized arguments containing interval in seconds
+ */
+export function setAutonomousInterval(args: StaticArray<u8>): void {
+  onlyAdmin();
+
+  const argsObj = new Args(args);
+  const interval = argsObj.nextU64().expect("Failed to deserialize interval");
+
+  assert(interval >= 60, "Interval must be at least 60 seconds");
+
+  Storage.set(AUTONOMOUS_INTERVAL_KEY, interval.toString());
+  generateEvent(`Autonomous SC interval set to: ${interval} seconds`);
+}
+
+/**
+ * Get autonomous execution interval
+ */
+export function getAutonomousInterval(): void {
+  const interval = Storage.get(AUTONOMOUS_INTERVAL_KEY);
+  generateEvent(`Autonomous SC interval: ${interval !== null ? interval : "3600"} seconds`);
+}
+
+/**
+ * Get last autonomous execution time
+ */
+export function getLastAutonomousRun(): void {
+  const lastRun = Storage.get(LAST_AUTONOMOUS_RUN_KEY);
+  generateEvent(`Last autonomous run: ${lastRun !== null ? lastRun : "0"}`);
+}
+
+/**
+ * Main autonomous execution function
+ * This function is called periodically by the Massa autonomous SC system
+ * It checks all polls and distributes rewards for ended polls with autonomous distribution
+ */
+export function checkAndDistribute(): void {
+  // Check if autonomous execution is enabled
+  const autonomousEnabled = Storage.get(AUTONOMOUS_ENABLED_KEY);
+  if (autonomousEnabled === null || autonomousEnabled !== "true") {
+    generateEvent("Autonomous execution is disabled");
+    return;
+  }
+
+  // Check if enough time has passed since last run
+  const currentTime = Context.timestamp();
+  const lastRunStr = Storage.get(LAST_AUTONOMOUS_RUN_KEY);
+  const lastRun = lastRunStr !== null ? u64.parse(lastRunStr) : 0;
+  const intervalStr = Storage.get(AUTONOMOUS_INTERVAL_KEY);
+  const interval = intervalStr !== null ? u64.parse(intervalStr) : 3600;
+
+  if (currentTime - lastRun < interval) {
+    generateEvent(`Autonomous execution skipped - not enough time passed (${currentTime - lastRun}s / ${interval}s)`);
+    return;
+  }
+
+  // Update last run time
+  Storage.set(LAST_AUTONOMOUS_RUN_KEY, currentTime.toString());
+
+  // Get total number of polls
+  const pollCounterStr = Storage.get(POLL_COUNTER_KEY);
+  const pollCounter = pollCounterStr ? u64.parse(pollCounterStr) : 0;
+
+  generateEvent(`🤖 Autonomous execution started - checking ${pollCounter} polls`);
+
+  let pollsChecked: u32 = 0;
+  let pollsDistributed: u32 = 0;
+
+  // Iterate through all polls
+  for (let i: u64 = 1; i <= pollCounter; i++) {
+    const pollKey = `${POLL_PREFIX}${i.toString()}`;
+    const pollData = Storage.get(pollKey);
+
+    if (pollData === null) continue;
+
+    const poll = Poll.deserialize(pollData);
+    pollsChecked++;
+
+    // Check if poll meets criteria for autonomous distribution
+    if (poll.distributionType !== DistributionType.AUTONOMOUS) {
+      continue; // Skip non-autonomous polls
+    }
+
+    // Check if poll has ended
+    if (currentTime < poll.endTime) {
+      continue; // Poll hasn't ended yet
+    }
+
+    // Check if already distributed
+    const distributedKey = `${DISTRIBUTED_PREFIX}${i.toString()}`;
+    if (Storage.get(distributedKey) !== null) {
+      continue; // Already distributed
+    }
+
+    // Check if poll has active status (hasn't been manually ended)
+    if (poll.status !== PollStatus.ACTIVE && poll.status !== PollStatus.ENDED) {
+      continue; // Poll was closed manually
+    }
+
+    // Distribute rewards for this poll
+    // End poll if still active
+    if (poll.status === PollStatus.ACTIVE) {
+      poll.end();
+    }
+
+    const totalVoters = getTotalVoters(poll);
+
+    if (totalVoters === 0 || poll.rewardPool === 0) {
+      // No voters or no rewards, just mark as distributed
+      Storage.set(distributedKey, "true");
+      poll.rewardsDistributed = true;
+      Storage.set(pollKey, poll.serialize());
+      generateEvent(`Poll ${i} - No distribution needed (voters: ${totalVoters}, pool: ${poll.rewardPool})`);
+      pollsDistributed++;
+      continue;
+    }
+
+    const rewardAmount = calculateVoterReward(poll, totalVoters);
+
+    // Mark as distributed
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    Storage.set(distributedKey, "true");
+
+    generateEvent(`✅ Poll ${i} - Autonomous distribution completed (${rewardAmount} nanoMASSA per voter, ${totalVoters} voters)`);
+    pollsDistributed++;
+  }
+
+  generateEvent(`🤖 Autonomous execution completed - Checked: ${pollsChecked}, Distributed: ${pollsDistributed}`);
+}
+
+/**
+ * Manual trigger for autonomous distribution (admin only, for testing/emergency)
+ * @param args - Serialized arguments containing pollId
+ */
+export function manualTriggerDistribution(args: StaticArray<u8>): void {
+  onlyAdmin();
+
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  const pollData = Storage.get(pollKey);
+  assert(pollData != null, "Poll does not exist");
+
+  const poll = Poll.deserialize(pollData);
+
+  // Check if poll has ended
+  const currentTime = Context.timestamp();
+  assert(currentTime >= poll.endTime, "Poll has not ended yet");
+
+  // Check distribution type
+  assert(poll.distributionType === DistributionType.AUTONOMOUS, "This poll does not use autonomous distribution");
+
+  // Check not already distributed
+  const distributedKey = `${DISTRIBUTED_PREFIX}${pollId}`;
+  assert(Storage.get(distributedKey) === null, "Rewards already distributed");
+
+  // Perform distribution
+  if (poll.status === PollStatus.ACTIVE) {
+    poll.end();
+  }
+
+  const totalVoters = getTotalVoters(poll);
+
+  if (totalVoters === 0 || poll.rewardPool === 0) {
+    Storage.set(distributedKey, "true");
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    generateEvent(`Manual trigger: Poll ${pollId} - no distribution needed`);
+    return;
+  }
+
+  const rewardAmount = calculateVoterReward(poll, totalVoters);
+
+  poll.rewardsDistributed = true;
+  Storage.set(pollKey, poll.serialize());
+  Storage.set(distributedKey, "true");
+
+  generateEvent(`Manual trigger: Poll ${pollId} - distributed ${rewardAmount} nanoMASSA per voter (${totalVoters} voters)`);
+}
+
 /**
  * Create a new poll
  * @param args - Serialized arguments containing title, description, options, duration, projectId, and economics parameters
@@ -600,8 +823,9 @@ export function createPoll(args: StaticArray<u8>): void {
   const newPollId = pollCounter + 1;
 
   // Create poll
-  const currentTime = Context.timestamp(); // Returns seconds since epoch
-  const endTime = currentTime + durationInSeconds; // Both in seconds
+  const currentTime = Context.timestamp(); // Returns MILLISECONDS since epoch (not seconds!)
+  const durationInMs = durationInSeconds * 1000; // Convert seconds to milliseconds
+  const endTime = currentTime + durationInMs; // Both in milliseconds
 
   // Get transferred coins (for self-funded polls)
   const transferredCoins = Context.transferredCoins();
@@ -857,7 +1081,7 @@ export function claimReward(args: StaticArray<u8>): void {
   assert(poll.rewardPool >= rewardAmount, "Insufficient reward pool");
 
   // Transfer reward
-  Context.transferCoins(new Address(Context.caller().toString()), rewardAmount);
+  call(new Address(Context.caller().toString()), "", new Args(), rewardAmount);
 
   // Update poll reward pool
   poll.rewardPool -= rewardAmount;
@@ -1211,6 +1435,47 @@ export function createProject(args: StaticArray<u8>): void {
 }
 
 /**
+ * Update an existing project
+ * Only the project creator can update it
+ * @param args - Serialized arguments containing projectId, name, and description
+ */
+export function updateProject(args: StaticArray<u8>): void {
+  whenNotPaused(); // Check if contract is not paused
+
+  const argsObj = new Args(args);
+  const projectId = argsObj.nextString().expect("Failed to deserialize project ID");
+  const newName = argsObj.nextString().expect("Failed to deserialize project name");
+  const newDescription = argsObj.nextString().expect("Failed to deserialize project description");
+
+  // Validate inputs
+  assert(newName.length > 0, "Project name cannot be empty");
+  assert(newDescription.length > 0, "Project description cannot be empty");
+
+  // Get existing project
+  const projectKey = `${PROJECT_PREFIX}${projectId}`;
+  const projectData = Storage.get(projectKey);
+  assert(projectData != null, "Project does not exist");
+
+  const project = Project.deserialize(projectData);
+
+  // Check if caller is the creator
+  assert(project.creator == Context.caller().toString(), "Only project creator can update the project");
+
+  // Update project details (keep ID, creator, createdAt, and pollIds unchanged)
+  project.name = newName;
+  project.description = newDescription;
+
+  // Save updated project
+  Storage.set(projectKey, project.serialize());
+
+  // Emit update notification
+  generateEvent(`Project ${projectId} updated by ${Context.caller().toString()}`);
+
+  // Emit full updated project data for immediate retrieval
+  generateEvent(`Project ${projectId}: ${project.serialize()}`);
+}
+
+/**
  * Get project details
  * @param args - Serialized arguments containing projectId
  */
@@ -1251,35 +1516,6 @@ export function getAllProjects(): void {
  * Update project details (only creator can do this)
  * @param args - Serialized arguments containing projectId, newName, newDescription
  */
-export function updateProject(args: StaticArray<u8>): void {
-  const argsObj = new Args(args);
-  const projectId = argsObj.nextString().expect("Failed to deserialize project ID");
-  const newName = argsObj.nextString().expect("Failed to deserialize new name");
-  const newDescription = argsObj.nextString().expect("Failed to deserialize new description");
-
-  // Get project
-  const projectKey = `${PROJECT_PREFIX}${projectId}`;
-  const projectData = Storage.get(projectKey);
-  assert(projectData != null, "Project does not exist");
-
-  const project = Project.deserialize(projectData);
-
-  // Check if caller is the creator
-  assert(project.creator == Context.caller().toString(), "Only project creator can update the project");
-
-  // Validate inputs
-  assert(newName.length > 0, "Project name cannot be empty");
-  assert(newDescription.length > 0, "Project description cannot be empty");
-
-  // Update project
-  project.name = newName;
-  project.description = newDescription;
-
-  // Save updated project
-  Storage.set(projectKey, project.serialize());
-
-  generateEvent(`Project ${projectId} updated by creator ${Context.caller().toString()}`);
-}
 
 /**
  * Get polls by project
@@ -1333,4 +1569,146 @@ export function deleteProject(args: StaticArray<u8>): void {
   Storage.del(projectKey);
 
   generateEvent(`Project ${projectId} deleted by creator ${Context.caller().toString()}`);
+}
+
+// ================= TREASURY FUNCTIONS =================
+
+/**
+ * Approve a treasury-funded poll (only admin)
+ * This approves the poll and optionally funds it with transferred coins
+ * @param args - Serialized arguments containing pollId
+ */
+export function approveTreasuryPoll(args: StaticArray<u8>): void {
+  onlyAdmin();
+
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  const pollData = Storage.get(pollKey);
+  assert(pollData != null, "Poll does not exist");
+
+  const poll = Poll.deserialize(pollData);
+
+  // Check if poll is treasury-funded
+  assert(poll.fundingType === FundingType.TREASURY_FUNDED, "Poll is not treasury-funded");
+
+  // Check if poll is still active
+  assert(poll.status === PollStatus.ACTIVE, "Poll is not active");
+
+  // Check if already approved
+  assert(!poll.treasuryApproved, "Poll is already approved");
+
+  // Approve the poll
+  poll.treasuryApproved = true;
+
+  // Get transferred coins (admin can optionally fund when approving)
+  const transferredCoins = Context.transferredCoins();
+  if (transferredCoins > 0) {
+    poll.rewardPool += transferredCoins;
+
+    // Track admin contribution
+    const contributorKey = `${CONTRIBUTOR_PREFIX}${pollId}_${Context.caller().toString()}`;
+    const existingContribution = Storage.get(contributorKey);
+    const previousAmount = existingContribution !== null ? u64.parse(existingContribution) : 0;
+    Storage.set(contributorKey, (previousAmount + transferredCoins).toString());
+  }
+
+  // Save updated poll
+  Storage.set(pollKey, poll.serialize());
+
+  const fundingMsg = transferredCoins > 0 ? ` and funded with ${transferredCoins} nanoMASSA` : "";
+  generateEvent(`Treasury poll ${pollId} approved${fundingMsg} by admin ${Context.caller().toString()}`);
+}
+
+/**
+ * Reject a treasury-funded poll (only admin)
+ * This prevents the poll from receiving treasury funding
+ * @param args - Serialized arguments containing pollId
+ */
+export function rejectTreasuryPoll(args: StaticArray<u8>): void {
+  onlyAdmin();
+
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  const pollData = Storage.get(pollKey);
+  assert(pollData != null, "Poll does not exist");
+
+  const poll = Poll.deserialize(pollData);
+
+  // Check if poll is treasury-funded
+  assert(poll.fundingType === FundingType.TREASURY_FUNDED, "Poll is not treasury-funded");
+
+  // Check if poll is still active
+  assert(poll.status === PollStatus.ACTIVE, "Poll is not active");
+
+  // Check if not already approved
+  assert(!poll.treasuryApproved, "Cannot reject an already approved poll");
+
+  // Close the poll since it was rejected
+  poll.status = PollStatus.CLOSED;
+
+  // Save updated poll
+  Storage.set(pollKey, poll.serialize());
+
+  generateEvent(`Treasury poll ${pollId} rejected and closed by admin ${Context.caller().toString()}`);
+}
+
+/**
+ * Get all treasury-funded polls pending approval
+ * Returns a serialized list of poll IDs that need treasury approval
+ */
+export function getPendingTreasuryPolls(): void {
+  const pollCounterStr = Storage.get(POLL_COUNTER_KEY);
+  const pollCounter = pollCounterStr ? u64.parse(pollCounterStr) : 0;
+
+  const pendingPolls: string[] = [];
+
+  // Iterate through all polls
+  for (let i: u64 = 1; i <= pollCounter; i++) {
+    const pollKey = `${POLL_PREFIX}${i.toString()}`;
+    const pollData = Storage.get(pollKey);
+
+    if (pollData !== null) {
+      const poll = Poll.deserialize(pollData);
+
+      // Check if poll is treasury-funded, active, and not yet approved
+      if (
+        poll.fundingType === FundingType.TREASURY_FUNDED &&
+        poll.status === PollStatus.ACTIVE &&
+        !poll.treasuryApproved
+      ) {
+        pendingPolls.push(i.toString());
+      }
+    }
+  }
+
+  // Generate event with list of pending poll IDs
+  const pendingPollsStr = pendingPolls.join(",");
+  generateEvent(`Pending treasury polls: ${pendingPollsStr}`);
+}
+
+/**
+ * Get treasury approval status for a poll
+ * @param args - Serialized arguments containing pollId
+ */
+export function getTreasuryApprovalStatus(args: StaticArray<u8>): void {
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  const pollData = Storage.get(pollKey);
+  assert(pollData != null, "Poll does not exist");
+
+  const poll = Poll.deserialize(pollData);
+
+  const status = poll.treasuryApproved ? "approved" : "pending";
+  const fundingType = poll.fundingType === FundingType.TREASURY_FUNDED ? "treasury" : "non-treasury";
+
+  generateEvent(`Poll ${pollId} - Funding type: ${fundingType}, Approval status: ${status}`);
 }
