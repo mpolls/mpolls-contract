@@ -376,6 +376,40 @@ export function burn(args: StaticArray<u8>): void {
 }
 
 /**
+ * Buy MPOLLS tokens by sending MASSA
+ * Exchange rate: 1 MASSA = 100 MPOLLS tokens
+ */
+export function buyTokens(_: StaticArray<u8>): void {
+  const buyer = Context.caller().toString();
+  const massaSent = Context.transferredCoins(); // in nanoMASSA
+
+  assert(massaSent > 0, "Must send MASSA to buy tokens");
+
+  // Exchange rate: 1 MASSA (10^9 nanoMASSA) = 100 MPOLLS (100 * 10^9 smallest units)
+  // So: 1 nanoMASSA = 100 smallest MPOLLS units
+  const tokensToMint = massaSent * 100;
+
+  // Mint tokens to buyer
+  const balanceKey = `${BALANCE_PREFIX}${buyer}`;
+  const balanceStr = Storage.get(balanceKey);
+  const currentBalance = balanceStr !== null ? u64.parse(balanceStr) : 0;
+  const newBalance = currentBalance + tokensToMint;
+  Storage.set(balanceKey, newBalance.toString());
+
+  // Update total supply
+  const totalSupplyStr = Storage.get(TOTAL_SUPPLY_KEY);
+  const currentSupply = totalSupplyStr !== null ? u64.parse(totalSupplyStr) : 0;
+  const newSupply = currentSupply + tokensToMint;
+  Storage.set(TOTAL_SUPPLY_KEY, newSupply.toString());
+
+  // Convert to human-readable amounts for event
+  const massaAmount = massaSent / 1_000_000_000;
+  const tokenAmount = tokensToMint / 1_000_000_000;
+
+  generateEvent(`${buyer} bought ${tokenAmount} MPOLLS tokens for ${massaAmount} MASSA`);
+}
+
+/**
  * Reward tokens to multiple addresses (batch mint - only minter can call)
  * @param args - Serialized arguments containing number of recipients, followed by address-amount pairs
  */

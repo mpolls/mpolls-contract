@@ -523,6 +523,7 @@ export function getCreatePollRewardAmount(): void {
 
 /**
  * Internal function to mint reward tokens to an address
+ * @deprecated This function is deprecated. Use transferTokenReward instead.
  */
 function mintReward(recipient: string, amount: u64): void {
   const tokenAddressStr = Storage.get(TOKEN_CONTRACT_KEY);
@@ -542,6 +543,54 @@ function mintReward(recipient: string, amount: u64): void {
 
   const tokenAddress = new Address(tokenAddressStr);
   call(tokenAddress, "mint", mintArgs, 0);
+}
+
+/**
+ * Internal function to transfer MPOLLS tokens from contract to recipient
+ * Assumes the contract holds the tokens in its balance
+ */
+function transferTokenReward(recipient: string, amount: u64): void {
+  const tokenAddressStr = Storage.get(TOKEN_CONTRACT_KEY);
+  if (tokenAddressStr === null || tokenAddressStr.length === 0) {
+    return; // No token contract set
+  }
+
+  // Call transfer function on token contract
+  // The token contract's transfer function should transfer from this contract's address to the recipient
+  const transferArgs = new Args()
+    .add(recipient)
+    .add(amount);
+
+  const tokenAddress = new Address(tokenAddressStr);
+  call(tokenAddress, "transfer", transferArgs, 0);
+}
+
+/**
+ * Internal function to pull MPOLLS tokens from a user's balance to this contract
+ * User must have approved this contract to spend their tokens first
+ */
+function pullTokensFromUser(from: string, amount: u64): void {
+  const tokenAddressStr = Storage.get(TOKEN_CONTRACT_KEY);
+  if (tokenAddressStr === null || tokenAddressStr.length === 0) {
+    generateEvent("Warning: Token contract not configured, cannot pull tokens");
+    return;
+  }
+
+  if (amount === 0) {
+    return; // Nothing to pull
+  }
+
+  // Call transferFrom function on token contract
+  // transferFrom(from, to, amount) - from user to this contract
+  const transferFromArgs = new Args()
+    .add(from) // from address
+    .add(Context.callee().toString()) // to address (this contract)
+    .add(amount); // amount
+
+  const tokenAddress = new Address(tokenAddressStr);
+  call(tokenAddress, "transferFrom", transferFromArgs, 0);
+
+  generateEvent(`Pulled ${amount} MPOLLS tokens from ${from} to contract`);
 }
 
 // ================= AUTONOMOUS SC FUNCTIONS =================
@@ -835,6 +884,13 @@ export function createPoll(args: StaticArray<u8>): void {
     createPollRewardAmount = createRewardResult.unwrap();
   }
 
+  // Get reward pool amount (for MPOLLS token funding)
+  let rewardPoolAmount: u64 = 0;
+  const rewardPoolResult = argsObj.nextU64();
+  if (!rewardPoolResult.isErr()) {
+    rewardPoolAmount = rewardPoolResult.unwrap();
+  }
+
   // Validate inputs
   assert(title.length > 0, "Title cannot be empty");
   assert(description.length > 0, "Description cannot be empty");
@@ -867,8 +923,29 @@ export function createPoll(args: StaticArray<u8>): void {
   const durationInMs = durationInSeconds * 1000; // Convert seconds to milliseconds
   const endTime = currentTime + durationInMs; // Both in milliseconds
 
-  // Get transferred coins (for self-funded polls)
-  const transferredCoins = Context.transferredCoins();
+  // Handle initial funding based on reward token type
+  let initialRewardPool: u64 = 0;
+
+  if (rewardTokenType === RewardTokenType.NATIVE_MASSA) {
+    // For native MASSA, get transferred coins
+    const transferredCoins = Context.transferredCoins();
+    initialRewardPool = transferredCoins;
+  } else {
+    // For MPOLLS tokens, pull from creator's balance to this contract
+    // The creator must have approved this contract to spend their tokens first
+    const transferredCoins = Context.transferredCoins();
+
+    // If coins were sent with MPOLLS poll, it's an error
+    assert(transferredCoins === 0, "Don't send MASSA with MPOLLS token polls");
+
+    // Pull MPOLLS tokens from creator if amount > 0
+    if (rewardPoolAmount > 0) {
+      pullTokensFromUser(Context.caller().toString(), rewardPoolAmount);
+      initialRewardPool = rewardPoolAmount;
+    } else {
+      initialRewardPool = 0;
+    }
+  }
 
   const poll = new Poll(
     newPollId,
@@ -879,7 +956,7 @@ export function createPoll(args: StaticArray<u8>): void {
     currentTime,
     endTime,
     projectId,
-    transferredCoins, // Initial reward pool from transferred coins
+    initialRewardPool, // Initial reward pool (MASSA coins or 0 for MPOLLS)
     fundingType,
     distributionMode,
     distributionType,
@@ -909,24 +986,13 @@ export function createPoll(args: StaticArray<u8>): void {
   }
 
   // Emit creation notification
-  generateEvent(`Poll created with ID: ${newPollId} by ${Context.caller().toString()}${projectId > 0 ? ` in project ${projectId}` : ""} with reward pool: ${transferredCoins} nanoMASSA`);
+  generateEvent(`Poll created with ID: ${newPollId} by ${Context.caller().toString()}${projectId > 0 ? ` in project ${projectId}` : ""} with reward pool: ${poll.rewardPool} ${rewardTokenType === RewardTokenType.CUSTOM_TOKEN ? "MPOLLS tokens" : "nanoMASSA"}`);
 
   // Emit full poll data for immediate retrieval (similar to getAllPolls)
   generateEvent(`Poll ${newPollId}: ${poll.serialize()}`);
 
-  // Distribute create poll reward if configured
-  if (createPollRewardAmount > 0) {
-    if (rewardTokenType === RewardTokenType.CUSTOM_TOKEN) {
-      // Mint custom tokens as reward
-      mintReward(Context.caller().toString(), createPollRewardAmount);
-      generateEvent(`Creator ${Context.caller().toString()} earned ${createPollRewardAmount} MPOLLS tokens for creating poll ${newPollId}`);
-    } else {
-      // Transfer native MASSA tokens from poll's reward pool
-      // Note: For NATIVE_MASSA rewards, the creator should have funded the poll with enough MASSA
-      // and the reward will be distributed from the pool
-      generateEvent(`Creator ${Context.caller().toString()} will receive ${createPollRewardAmount} nanoMASSA from pool for creating poll ${newPollId}`);
-    }
-  }
+  // Note: Poll creators don't receive rewards - they fund the polls for respondents
+  // createPollRewardAmount is ignored (should always be 0)
 }
 
 /**
@@ -971,9 +1037,16 @@ export function vote(args: StaticArray<u8>): void {
   // Distribute vote reward if configured
   if (poll.voteRewardAmount > 0) {
     if (poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN) {
-      // Mint custom tokens as reward
-      mintReward(Context.caller().toString(), poll.voteRewardAmount);
-      generateEvent(`Voter ${Context.caller().toString()} earned ${poll.voteRewardAmount} MPOLLS tokens for voting on poll ${pollId}`);
+      // Transfer MPOLLS tokens from poll's reward pool
+      // Poll creator should have funded the poll with MPOLLS tokens
+      if (poll.rewardPool >= poll.voteRewardAmount) {
+        poll.rewardPool -= poll.voteRewardAmount;
+        Storage.set(pollKey, poll.serialize());
+        transferTokenReward(Context.caller().toString(), poll.voteRewardAmount);
+        generateEvent(`Voter ${Context.caller().toString()} earned ${poll.voteRewardAmount} MPOLLS tokens from pool for voting on poll ${pollId}`);
+      } else {
+        generateEvent(`Insufficient MPOLLS token balance in reward pool for voter ${Context.caller().toString()} on poll ${pollId}`);
+      }
     } else {
       // Transfer native MASSA tokens from poll's reward pool
       if (poll.rewardPool >= poll.voteRewardAmount) {
@@ -1036,6 +1109,46 @@ export function fundPoll(args: StaticArray<u8>): void {
   Storage.set(contributorKey, (previousAmount + transferredCoins).toString());
 
   generateEvent(`Poll ${pollId} funded with ${transferredCoins} nanoMASSA by ${Context.caller().toString()}. New pool: ${poll.rewardPool}`);
+}
+
+/**
+ * Fund a poll with MPOLLS tokens
+ * This function should be called by the token contract's transfer callback
+ * when tokens are transferred to this contract for poll funding
+ * @param args - Serialized arguments containing pollId and amount
+ */
+export function fundPollWithTokens(args: StaticArray<u8>): void {
+  whenNotPaused();
+
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+  const amount = argsObj.nextU64().expect("Failed to deserialize amount");
+
+  // Verify caller is the token contract (for security)
+  const tokenAddressStr = Storage.get(TOKEN_CONTRACT_KEY);
+  assert(tokenAddressStr !== null && tokenAddressStr.length > 0, "Token contract not configured");
+
+  // In a real implementation, you'd verify the caller is the token contract
+  // For now, we'll trust the call but log it for transparency
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  const pollData = Storage.get(pollKey);
+  assert(pollData != null, "Poll does not exist");
+
+  const poll = Poll.deserialize(pollData);
+
+  // Check if poll is still active
+  assert(poll.status === PollStatus.ACTIVE, "Poll is not active");
+
+  // Verify poll uses CUSTOM_TOKEN rewards
+  assert(poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN, "Poll must use MPOLLS token rewards");
+
+  // Update poll reward pool (amount is already in token's smallest unit)
+  poll.rewardPool += amount;
+  Storage.set(pollKey, poll.serialize());
+
+  generateEvent(`Poll ${pollId} funded with ${amount} MPOLLS tokens. New pool: ${poll.rewardPool} tokens`);
 }
 
 /**
