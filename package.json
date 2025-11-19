@@ -13,6 +13,8 @@
         "test-retrieve": "tsx test/test-poll-retrieve.js",
         "fund-contract": "tsx test/fund-contract.js",
         "deploy-contract": "tsx test/deploy-contract.js",
+        "deploy-token": "tsx test/deploy-token.js",
+        "configure-token": "tsx test/configure-token-integration.js",
         "test:vote": "tsx test/vote-submission.js",
         "clean": "rimraf build",
         "deploy": "npm run build && tsx src/deploy.ts",
