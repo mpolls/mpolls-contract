@@ -180,8 +180,13 @@ export function transferFrom(args: StaticArray<u8>): void {
   }
 
   const toBalanceKey = `${BALANCE_PREFIX}${to}`;
-  const toBalanceStr = Storage.get(toBalanceKey);
-  const toBalance = toBalanceStr !== null ? u64.parse(toBalanceStr) : 0;
+  let toBalance: u64 = 0;
+  if (Storage.has(toBalanceKey)) {
+    const toBalanceStr = Storage.get(toBalanceKey);
+    if (toBalanceStr !== null) {
+      toBalance = u64.parse(toBalanceStr);
+    }
+  }
   const newToBalance = toBalance + amount;
   Storage.set(toBalanceKey, newToBalance.toString());
 
