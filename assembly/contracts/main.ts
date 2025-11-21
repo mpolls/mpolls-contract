@@ -11,6 +11,11 @@ const CONTRIBUTOR_PREFIX = "contributor_";
 const CLAIMED_PREFIX = "claimed_";
 const DISTRIBUTED_PREFIX = "distributed_";
 
+// Statistics keys (aggregated counters)
+const TOTAL_RESPONSES_KEY = "total_responses";
+const TOTAL_REWARDS_DISTRIBUTED_KEY = "total_rewards_distributed";
+const ACTIVE_POLLS_KEY = "active_polls";
+
 // Upgrade management keys
 const ADMIN_KEY = "contract_admin";
 const VERSION_KEY = "contract_version";
@@ -976,6 +981,12 @@ export function createPoll(args: StaticArray<u8>): void {
   // Update poll counter
   Storage.set(POLL_COUNTER_KEY, newPollId.toString());
 
+  // Update active polls counter (new poll is always created as ACTIVE)
+  const activePolls = Storage.has(ACTIVE_POLLS_KEY)
+    ? u64.parse(Storage.get(ACTIVE_POLLS_KEY))
+    : 0;
+  Storage.set(ACTIVE_POLLS_KEY, (activePolls + 1).toString());
+
   // If poll belongs to a project, add it to the project
   if (projectId > 0) {
     const projectKey = `${PROJECT_PREFIX}${projectId.toString()}`;
@@ -1041,6 +1052,12 @@ export function vote(args: StaticArray<u8>): void {
 
   // Update poll in storage
   Storage.set(pollKey, poll.serialize());
+
+  // Update total responses counter
+  const totalResponses = Storage.has(TOTAL_RESPONSES_KEY)
+    ? u64.parse(Storage.get(TOTAL_RESPONSES_KEY))
+    : 0;
+  Storage.set(TOTAL_RESPONSES_KEY, (totalResponses + 1).toString());
 
   generateEvent(`Vote cast by ${Context.caller().toString()} for option ${optionIndex} in poll ${pollId}`);
 
@@ -1292,6 +1309,12 @@ export function claimReward(args: StaticArray<u8>): void {
   // Mark as claimed
   Storage.set(claimedKey, "true");
 
+  // Update total rewards distributed counter
+  const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+    ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+    : 0;
+  Storage.set(TOTAL_REWARDS_DISTRIBUTED_KEY, (totalRewardsDistributed + rewardAmount).toString());
+
   generateEvent(`Reward claimed: ${rewardAmount} nanoMASSA by ${Context.caller().toString()} from poll ${pollId}`);
 }
 
@@ -1463,6 +1486,33 @@ export function getAllPolls(): StaticArray<u8> {
 }
 
 /**
+ * Get platform statistics
+ * Uses aggregated counters for O(1) performance instead of iterating through all polls
+ * @returns Serialized statistics: totalPolls|totalResponses|totalRewardsDistributed|activePolls
+ */
+export function getStatistics(): StaticArray<u8> {
+  const pollCounter = Storage.has(POLL_COUNTER_KEY)
+    ? u64.parse(Storage.get(POLL_COUNTER_KEY))
+    : 0;
+
+  const totalResponses = Storage.has(TOTAL_RESPONSES_KEY)
+    ? u64.parse(Storage.get(TOTAL_RESPONSES_KEY))
+    : 0;
+
+  const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+    ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+    : 0;
+
+  const activePolls = Storage.has(ACTIVE_POLLS_KEY)
+    ? u64.parse(Storage.get(ACTIVE_POLLS_KEY))
+    : 0;
+
+  // Format: totalPolls|totalResponses|totalRewardsDistributed|activePolls
+  const result = `${pollCounter}|${totalResponses}|${totalRewardsDistributed}|${activePolls}`;
+  return stringToBytes(result);
+}
+
+/**
  * Get poll results
  * @param args - Serialized arguments containing pollId
  * @returns Serialized poll results
@@ -1542,10 +1592,18 @@ export function closePoll(args: StaticArray<u8>): void {
   
   // Close poll
   poll.close();
-  
+
   // Save updated poll
   Storage.set(pollKey, poll.serialize());
-  
+
+  // Decrement active polls counter (poll status changed from ACTIVE to CLOSED)
+  if (Storage.has(ACTIVE_POLLS_KEY)) {
+    const activePolls = u64.parse(Storage.get(ACTIVE_POLLS_KEY));
+    if (activePolls > 0) {
+      Storage.set(ACTIVE_POLLS_KEY, (activePolls - 1).toString());
+    }
+  }
+
   generateEvent(`Poll ${pollId} closed by creator ${Context.caller().toString()}`);
 }
 
@@ -1572,10 +1630,18 @@ export function endPoll(args: StaticArray<u8>): void {
   
   // End poll
   poll.end();
-  
+
   // Save updated poll
   Storage.set(pollKey, poll.serialize());
-  
+
+  // Decrement active polls counter (poll status changed from ACTIVE to ENDED)
+  if (Storage.has(ACTIVE_POLLS_KEY)) {
+    const activePolls = u64.parse(Storage.get(ACTIVE_POLLS_KEY));
+    if (activePolls > 0) {
+      Storage.set(ACTIVE_POLLS_KEY, (activePolls - 1).toString());
+    }
+  }
+
   generateEvent(`Poll ${pollId} ended due to time expiration`);
 }
 
