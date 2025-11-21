@@ -31,7 +31,8 @@ const AUTONOMOUS_INTERVAL_KEY = "autonomous_interval"; // In seconds
 enum PollStatus {
   ACTIVE = 0,
   CLOSED = 1,
-  ENDED = 2
+  ENDED = 2,
+  FOR_CLAIMING = 3
 }
 
 // Funding type enum
@@ -764,8 +765,8 @@ export function manualTriggerDistribution(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1066,8 +1067,8 @@ export function fundPoll(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1088,17 +1089,46 @@ export function fundPoll(args: StaticArray<u8>): void {
   }
   // COMMUNITY_FUNDED allows anyone to contribute
 
-  // Update poll reward pool
-  poll.rewardPool += transferredCoins;
+  // Check if funding goal has been reached
+  if (poll.fundingGoal > 0) {
+    assert(poll.rewardPool < poll.fundingGoal, "Poll funding goal has already been reached");
+
+    // Calculate how much funding is still needed
+    const remainingNeeded = poll.fundingGoal - poll.rewardPool;
+
+    // If transferred amount exceeds remaining needed, only accept what's needed
+    if (transferredCoins > remainingNeeded) {
+      // Refund the excess amount
+      const excessAmount = transferredCoins - remainingNeeded;
+      call(new Address(Context.caller().toString()), "", new Args(), excessAmount);
+
+      // Only add the remaining needed amount
+      poll.rewardPool += remainingNeeded;
+      generateEvent(`Poll ${pollId} funding goal reached! Accepted ${remainingNeeded} nanoMASSA, refunded ${excessAmount} nanoMASSA to ${Context.caller().toString()}`);
+    } else {
+      // Accept full amount as it doesn't exceed the goal
+      poll.rewardPool += transferredCoins;
+      const stillNeeded = poll.fundingGoal - poll.rewardPool;
+      generateEvent(`Poll ${pollId} funded with ${transferredCoins} nanoMASSA by ${Context.caller().toString()}. Pool: ${poll.rewardPool}/${poll.fundingGoal} (${stillNeeded} still needed)`);
+    }
+  } else {
+    // No funding goal set, accept any amount
+    poll.rewardPool += transferredCoins;
+    generateEvent(`Poll ${pollId} funded with ${transferredCoins} nanoMASSA by ${Context.caller().toString()}. New pool: ${poll.rewardPool}`);
+  }
+
   Storage.set(pollKey, poll.serialize());
 
-  // Track contributor
+  // Track contributor (only track the amount actually accepted, not any refunded excess)
   const contributorKey = `${CONTRIBUTOR_PREFIX}${pollId}_${Context.caller().toString()}`;
-  const existingContribution = Storage.get(contributorKey);
-  const previousAmount = existingContribution !== null ? u64.parse(existingContribution) : 0;
-  Storage.set(contributorKey, (previousAmount + transferredCoins).toString());
+  const previousAmount = Storage.has(contributorKey) ? u64.parse(Storage.get(contributorKey)) : 0;
 
-  generateEvent(`Poll ${pollId} funded with ${transferredCoins} nanoMASSA by ${Context.caller().toString()}. New pool: ${poll.rewardPool}`);
+  // Calculate actual amount accepted (might be less than transferredCoins if we refunded excess)
+  const actualContribution = poll.fundingGoal > 0 && transferredCoins > (poll.fundingGoal - (poll.rewardPool - transferredCoins))
+    ? poll.fundingGoal - (poll.rewardPool - transferredCoins)
+    : transferredCoins;
+
+  Storage.set(contributorKey, (previousAmount + actualContribution).toString());
 }
 
 /**
@@ -1123,8 +1153,8 @@ export function fundPollWithTokens(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1170,9 +1200,7 @@ export function getContribution(args: StaticArray<u8>): void {
   const contributor = argsObj.nextString().expect("Failed to deserialize contributor address");
 
   const contributorKey = `${CONTRIBUTOR_PREFIX}${pollId}_${contributor}`;
-  const contribution = Storage.get(contributorKey);
-
-  const amount = contribution !== null ? u64.parse(contribution) : 0;
+  const amount = Storage.has(contributorKey) ? u64.parse(Storage.get(contributorKey)) : 0;
   generateEvent(`Contributor ${contributor} contributed ${amount} nanoMASSA to poll ${pollId}`);
 }
 
@@ -1227,26 +1255,25 @@ export function claimReward(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
-  // Check poll has ended
-  assert(poll.status === PollStatus.ENDED || poll.status === PollStatus.CLOSED, "Poll must be ended or closed");
+  // Check poll is in FOR_CLAIMING status
+  assert(poll.status === PollStatus.FOR_CLAIMING, "Poll must be in FOR_CLAIMING status to claim rewards");
 
   // Check distribution type is MANUAL_PULL
   assert(poll.distributionType === DistributionType.MANUAL_PULL, "This poll does not use manual pull distribution");
 
   // Check if user voted
   const voterKey = `${VOTE_PREFIX}${pollId}_${Context.caller().toString()}`;
+  assert(Storage.has(voterKey), "User did not vote on this poll");
   const voteData = Storage.get(voterKey);
-  assert(voteData !== null, "User did not vote on this poll");
 
   // Check if already claimed
   const claimedKey = `${CLAIMED_PREFIX}${pollId}_${Context.caller().toString()}`;
-  const claimed = Storage.get(claimedKey);
-  assert(claimed === null, "Reward already claimed");
+  assert(!Storage.has(claimedKey), "Reward already claimed");
 
   // Calculate reward
   const totalVoters = getTotalVoters(poll);
@@ -1278,8 +1305,8 @@ export function distributeRewards(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1331,8 +1358,8 @@ export function autoDistributeRewards(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1346,8 +1373,7 @@ export function autoDistributeRewards(args: StaticArray<u8>): void {
 
   // Check not already distributed
   const distributedKey = `${DISTRIBUTED_PREFIX}${pollId}`;
-  const alreadyDistributed = Storage.get(distributedKey);
-  assert(alreadyDistributed === null, "Rewards already distributed");
+  assert(!Storage.has(distributedKey), "Rewards already distributed");
 
   // End poll if still active
   if (poll.status === PollStatus.ACTIVE) {
@@ -1386,9 +1412,7 @@ export function hasClaimed(args: StaticArray<u8>): void {
   const voterAddress = argsObj.nextString().expect("Failed to deserialize voter address");
 
   const claimedKey = `${CLAIMED_PREFIX}${pollId}_${voterAddress}`;
-  const claimed = Storage.get(claimedKey);
-
-  const hasClaimed = claimed !== null;
+  const hasClaimed = Storage.has(claimedKey);
   generateEvent(`Voter ${voterAddress} has claimed reward for poll ${pollId}: ${hasClaimed}`);
 }
 
@@ -1468,8 +1492,8 @@ export function updatePoll(args: StaticArray<u8>): void {
   
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
   
   const poll = Poll.deserialize(pollData);
   
@@ -1502,8 +1526,8 @@ export function closePoll(args: StaticArray<u8>): void {
   
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
   
   const poll = Poll.deserialize(pollData);
   
@@ -1532,8 +1556,8 @@ export function endPoll(args: StaticArray<u8>): void {
   
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
   
   const poll = Poll.deserialize(pollData);
   
@@ -1553,6 +1577,37 @@ export function endPoll(args: StaticArray<u8>): void {
 }
 
 /**
+ * Set poll status to FOR_CLAIMING (only creator can do this)
+ * This enables voters to claim their rewards
+ * @param args - Serialized arguments containing pollId
+ */
+export function setForClaiming(args: StaticArray<u8>): void {
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
+  const pollData = Storage.get(pollKey);
+
+  const poll = Poll.deserialize(pollData);
+
+  // Check if caller is the creator
+  assert(poll.creator == Context.caller().toString(), "Only poll creator can set poll to FOR_CLAIMING status");
+
+  // Check if poll is not already FOR_CLAIMING
+  assert(poll.status != PollStatus.FOR_CLAIMING, "Poll is already in FOR_CLAIMING status");
+
+  // Set status to FOR_CLAIMING
+  poll.status = PollStatus.FOR_CLAIMING;
+
+  // Save updated poll
+  Storage.set(pollKey, poll.serialize());
+
+  generateEvent(`Poll ${pollId} set to FOR_CLAIMING by creator ${Context.caller().toString()}`);
+}
+
+/**
  * Check if user has voted on a specific poll
  * @param args - Serialized arguments containing pollId and voter address
  * @returns Serialized boolean indicating if user has voted
@@ -1563,9 +1618,7 @@ export function hasVoted(args: StaticArray<u8>): void {
   const voterAddress = argsObj.nextString().expect("Failed to deserialize voter address");
 
   const voterKey = `${VOTE_PREFIX}${pollId}_${voterAddress}`;
-  const voteData = Storage.get(voterKey);
-
-  const hasVotedResult = voteData !== null;
+  const hasVotedResult = Storage.has(voterKey);
   generateEvent(`User ${voterAddress} has voted on poll ${pollId}: ${hasVotedResult}`);
 }
 
@@ -1765,8 +1818,8 @@ export function approveTreasuryPoll(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1789,8 +1842,7 @@ export function approveTreasuryPoll(args: StaticArray<u8>): void {
 
     // Track admin contribution
     const contributorKey = `${CONTRIBUTOR_PREFIX}${pollId}_${Context.caller().toString()}`;
-    const existingContribution = Storage.get(contributorKey);
-    const previousAmount = existingContribution !== null ? u64.parse(existingContribution) : 0;
+    const previousAmount = Storage.has(contributorKey) ? u64.parse(Storage.get(contributorKey)) : 0;
     Storage.set(contributorKey, (previousAmount + transferredCoins).toString());
   }
 
@@ -1814,8 +1866,8 @@ export function rejectTreasuryPoll(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
@@ -1881,8 +1933,8 @@ export function getTreasuryApprovalStatus(args: StaticArray<u8>): void {
 
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
+  assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  assert(pollData != null, "Poll does not exist");
 
   const poll = Poll.deserialize(pollData);
 
