@@ -1,4 +1,4 @@
-import { generateEvent, Storage, Context, call, Address } from "@massalabs/massa-as-sdk";
+import { generateEvent, Storage, Context, call, Address, transferCoins } from "@massalabs/massa-as-sdk";
 import { Args, stringToBytes, bytesToString } from "@massalabs/as-types";
 
 // Storage keys
@@ -1100,7 +1100,7 @@ export function fundPoll(args: StaticArray<u8>): void {
     if (transferredCoins > remainingNeeded) {
       // Refund the excess amount
       const excessAmount = transferredCoins - remainingNeeded;
-      call(new Address(Context.caller().toString()), "", new Args(), excessAmount);
+      transferCoins(new Address(Context.caller().toString()), excessAmount);
 
       // Only add the remaining needed amount
       poll.rewardPool += remainingNeeded;
@@ -1283,7 +1283,7 @@ export function claimReward(args: StaticArray<u8>): void {
   assert(poll.rewardPool >= rewardAmount, "Insufficient reward pool");
 
   // Transfer reward
-  call(new Address(Context.caller().toString()), "", new Args(), rewardAmount);
+  transferCoins(new Address(Context.caller().toString()), rewardAmount);
 
   // Update poll reward pool
   poll.rewardPool -= rewardAmount;
