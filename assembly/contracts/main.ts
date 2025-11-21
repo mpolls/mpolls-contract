@@ -1,5 +1,5 @@
 import { generateEvent, Storage, Context, call, Address } from "@massalabs/massa-as-sdk";
-import { Args } from "@massalabs/as-types";
+import { Args, stringToBytes, bytesToString } from "@massalabs/as-types";
 
 // Storage keys
 const POLL_COUNTER_KEY = "poll_counter";
@@ -1413,22 +1413,26 @@ export function getPoll(args: StaticArray<u8>): void {
 
 /**
  * Get all polls (returns poll IDs and basic info)
- * @returns Serialized array of poll data
+ * @returns Serialized array of poll data, separated by newlines
  */
-export function getAllPolls(): void {
+export function getAllPolls(): StaticArray<u8> {
   const pollCounterStr = Storage.get(POLL_COUNTER_KEY);
   const pollCounter = pollCounterStr ? u64.parse(pollCounterStr) : 0;
-  
-  generateEvent(`Total polls: ${pollCounter}`);
-  
-  // Return poll data for existing polls
+
+  const polls: string[] = [];
+
+  // Collect all poll data
   for (let i: u64 = 1; i <= pollCounter; i++) {
     const pollKey = `${POLL_PREFIX}${i.toString()}`;
     const pollData = Storage.get(pollKey);
     if (pollData != null) {
-      generateEvent(`Poll ${i}: ${pollData}`);
+      polls.push(pollData);
     }
   }
+
+  // Return polls joined by newlines
+  const result = polls.join("\n");
+  return stringToBytes(result);
 }
 
 /**
