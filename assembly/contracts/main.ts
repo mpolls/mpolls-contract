@@ -1043,6 +1043,9 @@ export function vote(args: StaticArray<u8>): void {
 
   generateEvent(`Vote cast by ${Context.caller().toString()} for option ${optionIndex} in poll ${pollId}`);
 
+  // Emit updated poll data for immediate frontend refresh
+  generateEvent(`Poll ${pollId}: ${poll.serialize()}`);
+
   // Note: Rewards are not distributed during voting.
   // Voters can claim their rewards after the poll ends using the claimReward() function
   // or rewards will be distributed automatically if autonomous distribution is enabled.
