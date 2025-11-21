@@ -1405,15 +1405,18 @@ export function autoDistributeRewards(args: StaticArray<u8>): void {
 /**
  * Check if voter has claimed reward
  * @param args - Serialized arguments containing pollId and voter address
+ * @returns Serialized boolean indicating if voter has claimed
  */
-export function hasClaimed(args: StaticArray<u8>): void {
+export function hasClaimed(args: StaticArray<u8>): StaticArray<u8> {
   const argsObj = new Args(args);
   const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
   const voterAddress = argsObj.nextString().expect("Failed to deserialize voter address");
 
   const claimedKey = `${CLAIMED_PREFIX}${pollId}_${voterAddress}`;
-  const hasClaimed = Storage.has(claimedKey);
-  generateEvent(`Voter ${voterAddress} has claimed reward for poll ${pollId}: ${hasClaimed}`);
+  const hasClaimedResult = Storage.has(claimedKey);
+
+  // Return the result directly
+  return stringToBytes(hasClaimedResult ? "true" : "false");
 }
 
 /**
@@ -1612,14 +1615,16 @@ export function setForClaiming(args: StaticArray<u8>): void {
  * @param args - Serialized arguments containing pollId and voter address
  * @returns Serialized boolean indicating if user has voted
  */
-export function hasVoted(args: StaticArray<u8>): void {
+export function hasVoted(args: StaticArray<u8>): StaticArray<u8> {
   const argsObj = new Args(args);
   const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
   const voterAddress = argsObj.nextString().expect("Failed to deserialize voter address");
 
   const voterKey = `${VOTE_PREFIX}${pollId}_${voterAddress}`;
   const hasVotedResult = Storage.has(voterKey);
-  generateEvent(`User ${voterAddress} has voted on poll ${pollId}: ${hasVotedResult}`);
+
+  // Return the result directly
+  return stringToBytes(hasVotedResult ? "true" : "false");
 }
 
 /**
