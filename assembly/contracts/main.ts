@@ -781,6 +781,14 @@ export function checkAndDistribute(): void {
         transferTokenReward(voterAddress, rewardAmount);
       }
 
+      // Record individual claim (same as manual claims)
+      const claimedKey = `${CLAIMED_PREFIX}${i.toString()}_${voterAddress}`;
+      Storage.set(claimedKey, "true");
+
+      // Emit claim event (same format as manual claims)
+      const tokenTypeStr = poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN ? 'MPOLLS tokens' : 'nanoMASSA';
+      generateEvent(`Reward claimed: ${rewardAmount.toString()} ${tokenTypeStr} by ${voterAddress} from poll ${i.toString()}`);
+
       distributedCount++;
       totalDistributed += rewardAmount;
     }
