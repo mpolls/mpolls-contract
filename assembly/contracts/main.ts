@@ -10,6 +10,12 @@ const PROJECT_PREFIX = "project_";
 const CONTRIBUTOR_PREFIX = "contributor_";
 const CLAIMED_PREFIX = "claimed_";
 const DISTRIBUTED_PREFIX = "distributed_";
+const POLL_VOTERS_PREFIX = "poll_voters_"; // List of voters for each poll
+
+// Statistics keys (aggregated counters)
+const TOTAL_RESPONSES_KEY = "total_responses";
+const TOTAL_REWARDS_DISTRIBUTED_KEY = "total_rewards_distributed";
+const ACTIVE_POLLS_KEY = "active_polls";
 
 // Upgrade management keys
 const ADMIN_KEY = "contract_admin";
@@ -147,6 +153,7 @@ class Poll {
   rewardTokenType: RewardTokenType; // Type of token used for rewards
   voteRewardAmount: u64; // Custom reward amount per vote
   createPollRewardAmount: u64; // Reward for creating the poll
+  distributionTime: u64; // Timestamp when auto-distribution should occur (0 = not set)
 
   constructor(
     id: u64,
@@ -188,13 +195,14 @@ class Poll {
     this.rewardTokenType = rewardTokenType;
     this.voteRewardAmount = voteRewardAmount;
     this.createPollRewardAmount = createPollRewardAmount;
+    this.distributionTime = 0; // Will be set when poll is closed with auto-distribute
   }
 
   // Serialize poll to storage format
   serialize(): string {
     const optionsStr = this.options.join("§§"); // Use § as separator to avoid conflicts with |
     const votesStr = this.voteCount.map<string>(v => v.toString()).join(",");
-    return `${this.id}|${this.title}|${this.description}|${optionsStr}|${this.creator}|${this.startTime}|${this.endTime}|${this.status}|${votesStr}|${this.projectId}|${this.rewardPool}|${this.fundingType}|${this.distributionMode}|${this.distributionType}|${this.fixedRewardAmount}|${this.fundingGoal}|${this.treasuryApproved}|${this.rewardsDistributed}|${this.rewardTokenType}|${this.voteRewardAmount}|${this.createPollRewardAmount}`;
+    return `${this.id}|${this.title}|${this.description}|${optionsStr}|${this.creator}|${this.startTime}|${this.endTime}|${this.status}|${votesStr}|${this.projectId}|${this.rewardPool}|${this.fundingType}|${this.distributionMode}|${this.distributionType}|${this.fixedRewardAmount}|${this.fundingGoal}|${this.treasuryApproved}|${this.rewardsDistributed}|${this.rewardTokenType}|${this.voteRewardAmount}|${this.createPollRewardAmount}|${this.distributionTime}`;
   }
 
   // Deserialize poll from storage format
@@ -215,6 +223,7 @@ class Poll {
     const rewardTokenType = parts.length > 18 && parts[18] ? (u8.parse(parts[18]) as RewardTokenType) : RewardTokenType.CUSTOM_TOKEN;
     const voteRewardAmount = parts.length > 19 && parts[19] ? u64.parse(parts[19]) : 0;
     const createPollRewardAmount = parts.length > 20 && parts[20] ? u64.parse(parts[20]) : 0;
+    const distributionTime = parts.length > 21 && parts[21] ? u64.parse(parts[21]) : 0;
 
     const poll = new Poll(
       u64.parse(parts[0]), // id
@@ -251,6 +260,9 @@ class Poll {
     if (parts.length > 17 && parts[17]) {
       poll.rewardsDistributed = parts[17] === "true";
     }
+
+    // Set distribution time from parsed value
+    poll.distributionTime = distributionTime;
 
     return poll;
   }
@@ -705,9 +717,14 @@ export function checkAndDistribute(): void {
       continue; // Skip non-autonomous polls
     }
 
-    // Check if poll has ended
-    if (currentTime < poll.endTime) {
-      continue; // Poll hasn't ended yet
+    // Check if distribution time has been reached (if set)
+    if (poll.distributionTime > 0 && currentTime < poll.distributionTime) {
+      continue; // Distribution time not reached yet
+    }
+
+    // Check if poll has ended (or distribution time has passed)
+    if (poll.distributionTime === 0 && currentTime < poll.endTime) {
+      continue; // Poll hasn't ended yet and no distribution time set
     }
 
     // Check if already distributed
@@ -716,37 +733,85 @@ export function checkAndDistribute(): void {
       continue; // Already distributed
     }
 
-    // Check if poll has active status (hasn't been manually ended)
-    if (poll.status !== PollStatus.ACTIVE && poll.status !== PollStatus.ENDED) {
-      continue; // Poll was closed manually
+    // Allow distribution for CLOSED or ENDED polls with auto-distribute
+    if (poll.status !== PollStatus.ACTIVE && poll.status !== PollStatus.CLOSED && poll.status !== PollStatus.ENDED) {
+      continue; // Poll in invalid status for distribution
     }
 
     // Distribute rewards for this poll
     // End poll if still active
-    if (poll.status === PollStatus.ACTIVE) {
+    if (poll.status === PollStatus.ACTIVE || poll.status === PollStatus.CLOSED) {
       poll.end();
     }
 
-    const totalVoters = getTotalVoters(poll);
+    // Get voter list
+    const votersKey = `${POLL_VOTERS_PREFIX}${i.toString()}`;
+    const votersData = Storage.get(votersKey);
 
-    if (totalVoters === 0 || poll.rewardPool === 0) {
+    if (votersData === null || votersData.length === 0 || poll.rewardPool === 0) {
       // No voters or no rewards, just mark as distributed
       Storage.set(distributedKey, "true");
       poll.rewardsDistributed = true;
       Storage.set(pollKey, poll.serialize());
-      generateEvent(`Poll ${i} - No distribution needed (voters: ${totalVoters}, pool: ${poll.rewardPool})`);
+      generateEvent(`Poll ${i} - No distribution needed (no voters or empty reward pool)`);
       pollsDistributed++;
       continue;
     }
 
+    // Parse voter addresses
+    const voterAddresses = votersData.split("|");
+    const totalVoters = u64(voterAddresses.length);
     const rewardAmount = calculateVoterReward(poll, totalVoters);
 
-    // Mark as distributed
-    poll.rewardsDistributed = true;
-    Storage.set(pollKey, poll.serialize());
-    Storage.set(distributedKey, "true");
+    // Batch distribution - limit to 50 voters per run to avoid gas limits
+    const maxBatchSize: i32 = 50;
+    const batchSize = voterAddresses.length > maxBatchSize ? maxBatchSize : voterAddresses.length;
 
-    generateEvent(`✅ Poll ${i} - Autonomous distribution completed (${rewardAmount} nanoMASSA per voter, ${totalVoters} voters)`);
+    let distributedCount: i32 = 0;
+    let totalDistributed: u64 = 0;
+
+    // Distribute to voters in this batch
+    for (let j: i32 = 0; j < batchSize; j++) {
+      const voterAddress = voterAddresses[j];
+
+      // Transfer reward based on token type
+      if (poll.rewardTokenType === RewardTokenType.NATIVE_MASSA) {
+        transferCoins(new Address(voterAddress), rewardAmount);
+      } else {
+        transferTokenReward(voterAddress, rewardAmount);
+      }
+
+      // Record individual claim (same as manual claims)
+      const claimedKey = `${CLAIMED_PREFIX}${i.toString()}_${voterAddress}`;
+      Storage.set(claimedKey, "true");
+
+      // Emit claim event (same format as manual claims)
+      const tokenTypeStr = poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN ? 'MPOLLS tokens' : 'nanoMASSA';
+      generateEvent(`Reward claimed: ${rewardAmount.toString()} ${tokenTypeStr} by ${voterAddress} from poll ${i.toString()}`);
+
+      distributedCount++;
+      totalDistributed += rewardAmount;
+    }
+
+    // Update total rewards distributed counter
+    const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+      ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+      : 0;
+    Storage.set(TOTAL_REWARDS_DISTRIBUTED_KEY, (totalRewardsDistributed + totalDistributed).toString());
+
+    // If all voters have been paid, mark as fully distributed
+    if (batchSize >= voterAddresses.length) {
+      Storage.set(distributedKey, "true");
+      poll.rewardsDistributed = true;
+      Storage.set(pollKey, poll.serialize());
+      generateEvent(`✅ Poll ${i} - Auto-distribution completed: ${distributedCount} voters paid ${rewardAmount} each (total: ${totalDistributed})`);
+    } else {
+      // More voters to process in next run - remove distributed voters from list
+      const remainingVoters = voterAddresses.slice(batchSize);
+      Storage.set(votersKey, remainingVoters.join("|"));
+      generateEvent(`📊 Poll ${i} - Batch distributed: ${distributedCount}/${voterAddresses.length} voters paid (${remainingVoters.length} remaining)`);
+    }
+
     pollsDistributed++;
   }
 
@@ -976,6 +1041,12 @@ export function createPoll(args: StaticArray<u8>): void {
   // Update poll counter
   Storage.set(POLL_COUNTER_KEY, newPollId.toString());
 
+  // Update active polls counter (new poll is always created as ACTIVE)
+  const activePolls = Storage.has(ACTIVE_POLLS_KEY)
+    ? u64.parse(Storage.get(ACTIVE_POLLS_KEY))
+    : 0;
+  Storage.set(ACTIVE_POLLS_KEY, (activePolls + 1).toString());
+
   // If poll belongs to a project, add it to the project
   if (projectId > 0) {
     const projectKey = `${PROJECT_PREFIX}${projectId.toString()}`;
@@ -1039,8 +1110,27 @@ export function vote(args: StaticArray<u8>): void {
   poll.voteCount[optionIndex] += 1;
   Storage.set(voterKey, optionIndex.toString());
 
+  // Track voter for auto-distribution (add to poll's voter list)
+  const votersKey = `${POLL_VOTERS_PREFIX}${pollId}`;
+  const voterAddress = Context.caller().toString();
+
+  if (Storage.has(votersKey)) {
+    const existingVoters = Storage.get(votersKey);
+    // Append new voter with pipe separator
+    Storage.set(votersKey, `${existingVoters}|${voterAddress}`);
+  } else {
+    // First voter for this poll
+    Storage.set(votersKey, voterAddress);
+  }
+
   // Update poll in storage
   Storage.set(pollKey, poll.serialize());
+
+  // Update total responses counter
+  const totalResponses = Storage.has(TOTAL_RESPONSES_KEY)
+    ? u64.parse(Storage.get(TOTAL_RESPONSES_KEY))
+    : 0;
+  Storage.set(TOTAL_RESPONSES_KEY, (totalResponses + 1).toString());
 
   generateEvent(`Vote cast by ${Context.caller().toString()} for option ${optionIndex} in poll ${pollId}`);
 
@@ -1292,6 +1382,12 @@ export function claimReward(args: StaticArray<u8>): void {
   // Mark as claimed
   Storage.set(claimedKey, "true");
 
+  // Update total rewards distributed counter
+  const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+    ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+    : 0;
+  Storage.set(TOTAL_REWARDS_DISTRIBUTED_KEY, (totalRewardsDistributed + rewardAmount).toString());
+
   generateEvent(`Reward claimed: ${rewardAmount} nanoMASSA by ${Context.caller().toString()} from poll ${pollId}`);
 }
 
@@ -1463,6 +1559,33 @@ export function getAllPolls(): StaticArray<u8> {
 }
 
 /**
+ * Get platform statistics
+ * Uses aggregated counters for O(1) performance instead of iterating through all polls
+ * @returns Serialized statistics: totalPolls|totalResponses|totalRewardsDistributed|activePolls
+ */
+export function getStatistics(): StaticArray<u8> {
+  const pollCounter = Storage.has(POLL_COUNTER_KEY)
+    ? u64.parse(Storage.get(POLL_COUNTER_KEY))
+    : 0;
+
+  const totalResponses = Storage.has(TOTAL_RESPONSES_KEY)
+    ? u64.parse(Storage.get(TOTAL_RESPONSES_KEY))
+    : 0;
+
+  const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+    ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+    : 0;
+
+  const activePolls = Storage.has(ACTIVE_POLLS_KEY)
+    ? u64.parse(Storage.get(ACTIVE_POLLS_KEY))
+    : 0;
+
+  // Format: totalPolls|totalResponses|totalRewardsDistributed|activePolls
+  const result = `${pollCounter}|${totalResponses}|${totalRewardsDistributed}|${activePolls}`;
+  return stringToBytes(result);
+}
+
+/**
  * Get poll results
  * @param args - Serialized arguments containing pollId
  * @returns Serialized poll results
@@ -1526,26 +1649,51 @@ export function updatePoll(args: StaticArray<u8>): void {
 export function closePoll(args: StaticArray<u8>): void {
   const argsObj = new Args(args);
   const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
-  
+
+  // Try to get distributionTime (optional parameter)
+  const distributionTimeResult = argsObj.nextU64();
+  const distributionTime: u64 = distributionTimeResult.isOk() ? distributionTimeResult.unwrap() : 0;
+
   // Get poll
   const pollKey = `${POLL_PREFIX}${pollId}`;
   assert(Storage.has(pollKey), "Poll does not exist");
   const pollData = Storage.get(pollKey);
-  
+
   const poll = Poll.deserialize(pollData);
-  
+
   // Check if caller is the creator
   assert(poll.creator == Context.caller().toString(), "Only poll creator can close the poll");
-  
+
   // Check if poll is not already closed/ended
   assert(poll.status == PollStatus.ACTIVE, "Poll is already closed or ended");
-  
+
+  // If distribution time is provided, validate it
+  if (distributionTime > 0) {
+    const currentTime: u64 = Context.timestamp();
+    assert(distributionTime > currentTime, "Distribution time must be in the future");
+
+    // Set the distribution time for auto-distribution
+    poll.distributionTime = distributionTime;
+
+    generateEvent(`Poll ${pollId} closed with auto-distribution scheduled for timestamp ${distributionTime.toString()} (current: ${currentTime.toString()})`);
+  } else {
+    generateEvent(`Poll ${pollId} closed without auto-distribution schedule`);
+  }
+
   // Close poll
   poll.close();
-  
+
   // Save updated poll
   Storage.set(pollKey, poll.serialize());
-  
+
+  // Decrement active polls counter (poll status changed from ACTIVE to CLOSED)
+  if (Storage.has(ACTIVE_POLLS_KEY)) {
+    const activePolls = u64.parse(Storage.get(ACTIVE_POLLS_KEY));
+    if (activePolls > 0) {
+      Storage.set(ACTIVE_POLLS_KEY, (activePolls - 1).toString());
+    }
+  }
+
   generateEvent(`Poll ${pollId} closed by creator ${Context.caller().toString()}`);
 }
 
@@ -1572,10 +1720,18 @@ export function endPoll(args: StaticArray<u8>): void {
   
   // End poll
   poll.end();
-  
+
   // Save updated poll
   Storage.set(pollKey, poll.serialize());
-  
+
+  // Decrement active polls counter (poll status changed from ACTIVE to ENDED)
+  if (Storage.has(ACTIVE_POLLS_KEY)) {
+    const activePolls = u64.parse(Storage.get(ACTIVE_POLLS_KEY));
+    if (activePolls > 0) {
+      Storage.set(ACTIVE_POLLS_KEY, (activePolls - 1).toString());
+    }
+  }
+
   generateEvent(`Poll ${pollId} ended due to time expiration`);
 }
 
