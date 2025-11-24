@@ -27,7 +27,7 @@ const contract = await SmartContract.deploy(
   byteCode,
   constructorArgs,
   {
-    coins: Mas.fromString('0.1'),
+    coins: Mas.fromString('10'), // Fund with 10 MASSA for deferred call operations
     fee: Mas.fromString('0.01')
   },
 );
