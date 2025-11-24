@@ -1,4 +1,4 @@
-import { generateEvent, Storage, Context, call, Address, transferCoins } from "@massalabs/massa-as-sdk";
+import { generateEvent, Storage, Context, call, Address, transferCoins, deferredCallRegister, findCheapestSlot, deferredCallQuote, balance } from "@massalabs/massa-as-sdk";
 import { Args, stringToBytes, bytesToString } from "@massalabs/as-types";
 
 // Storage keys
@@ -11,6 +11,7 @@ const CONTRIBUTOR_PREFIX = "contributor_";
 const CLAIMED_PREFIX = "claimed_";
 const DISTRIBUTED_PREFIX = "distributed_";
 const POLL_VOTERS_PREFIX = "poll_voters_"; // List of voters for each poll
+const DEFERRED_CALL_PREFIX = "deferred_call_"; // Deferred call ID for auto-distribution
 
 // Statistics keys (aggregated counters)
 const TOTAL_RESPONSES_KEY = "total_responses";
@@ -819,6 +820,193 @@ export function checkAndDistribute(): void {
 }
 
 /**
+ * Helper function to register a deferred call for reward distribution
+ * @param pollId - The poll ID to distribute rewards for
+ * @param periodsFromNow - Number of periods from now to schedule the call
+ */
+function registerDeferredDistribution(pollId: string, periodsFromNow: u64): void {
+  const currentPeriod = Context.currentPeriod();
+  const maxGas: u64 = 200_000_000; // 200M gas for distribution operation (matching reference example scale)
+  const args = new Args().add(pollId);
+  const paramsSize = args.serialize().length;
+
+  generateEvent(`🔍 DEBUG: Starting deferred call setup - pollId: ${pollId}, periodsFromNow: ${periodsFromNow.toString()}, currentPeriod: ${currentPeriod.toString()}`);
+
+  // Calculate target period
+  const targetPeriod = currentPeriod + periodsFromNow;
+
+  generateEvent(`🔍 DEBUG: Target period - targetPeriod: ${targetPeriod.toString()}, maxGas: ${maxGas.toString()}, paramsSize: ${paramsSize.toString()}`);
+
+  // Find cheapest slot at the exact target period (like reference implementation)
+  const slot = findCheapestSlot(
+    targetPeriod,
+    targetPeriod, // Use same period for start and end, like the reference implementation
+    maxGas,
+    paramsSize
+  );
+
+  generateEvent(`🔍 DEBUG: Slot found - period: ${slot.period.toString()}, thread: ${slot.thread.toString()}`);
+
+  // Get quote for the call
+  const cost = deferredCallQuote(slot, maxGas, paramsSize);
+  const contractBalance = balance();
+
+  generateEvent(`💰 Balance check - cost: ${cost.toString()}, balance: ${contractBalance.toString()}`);
+
+  assert(contractBalance >= cost, `Insufficient balance for deferred call: ${contractBalance.toString()} < ${cost.toString()}`);
+
+  generateEvent(`📞 About to call deferredCallRegister - address: ${Context.callee().toString()}, function: distributeRewards, slot.period: ${slot.period.toString()}, slot.thread: ${slot.thread.toString()}, maxGas: ${maxGas.toString()}, coins: 0`);
+
+  // Register the deferred call
+  const callId = deferredCallRegister(
+    Context.callee().toString(),
+    'distributeRewards',
+    slot,
+    maxGas,
+    args.serialize(),
+    0 // No coins to transfer
+  );
+
+  // Store the call ID for this poll
+  const deferredCallKey = `${DEFERRED_CALL_PREFIX}${pollId}`;
+  Storage.set(deferredCallKey, callId);
+
+  generateEvent(`✅ Deferred call registered for poll ${pollId}: ID ${callId}, slot period ${slot.period.toString()}`);
+}
+
+/**
+ * Distribute rewards for a specific poll (called by deferred call)
+ * This function is triggered by the deferred call registered when a poll is closed
+ * @param args - Serialized arguments containing pollId
+ */
+export function distributeRewards(args: StaticArray<u8>): void {
+  // Verify that the caller is the contract itself (deferred call)
+  assert(
+    Context.callee() === Context.caller(),
+    'Only the contract itself can call this function (via deferred call)'
+  );
+
+  const argsObj = new Args(args);
+  const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
+
+  generateEvent(`⏰ Deferred call triggered: Distributing rewards for poll ${pollId}`);
+
+  // Get poll
+  const pollKey = `${POLL_PREFIX}${pollId}`;
+  if (!Storage.has(pollKey)) {
+    generateEvent(`❌ Poll ${pollId} not found`);
+    return;
+  }
+
+  const pollData = Storage.get(pollKey);
+  const poll = Poll.deserialize(pollData);
+
+  // Verify this is an auto-distribute poll
+  if (poll.distributionType !== DistributionType.AUTONOMOUS) {
+    generateEvent(`❌ Poll ${pollId} is not configured for auto-distribution`);
+    return;
+  }
+
+  // Check if already distributed
+  const distributedKey = `${DISTRIBUTED_PREFIX}${pollId}`;
+  if (Storage.has(distributedKey) && Storage.get(distributedKey) === "true") {
+    generateEvent(`ℹ️ Poll ${pollId} rewards already distributed`);
+    return;
+  }
+
+  // Check if poll is closed
+  if (poll.status !== PollStatus.CLOSED && poll.status !== PollStatus.ENDED) {
+    generateEvent(`❌ Poll ${pollId} is not closed/ended (status: ${poll.status})`);
+    return;
+  }
+
+  // Get voters list
+  const votersKey = `${POLL_VOTERS_PREFIX}${pollId}`;
+  if (!Storage.has(votersKey)) {
+    generateEvent(`ℹ️ Poll ${pollId} has no voters`);
+    Storage.set(distributedKey, "true");
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    return;
+  }
+
+  const votersData = Storage.get(votersKey);
+  if (votersData.length === 0) {
+    generateEvent(`ℹ️ Poll ${pollId} has empty voters list`);
+    Storage.set(distributedKey, "true");
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    return;
+  }
+
+  // Parse voter addresses
+  const voterAddresses = votersData.split("|");
+  const totalVoters = u64(voterAddresses.length);
+
+  // Calculate reward amount per voter
+  const rewardAmount = calculateVoterReward(poll, totalVoters);
+
+  if (rewardAmount === 0 || poll.rewardPool === 0) {
+    generateEvent(`ℹ️ Poll ${pollId} has no reward pool`);
+    Storage.set(distributedKey, "true");
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    return;
+  }
+
+  let distributedCount: i32 = 0;
+  let totalDistributed: u64 = 0;
+
+  // Distribute to all voters (batch limit: 50 per call)
+  const maxBatchSize: i32 = 50;
+  const batchSize = voterAddresses.length > maxBatchSize ? maxBatchSize : voterAddresses.length;
+
+  for (let j: i32 = 0; j < batchSize; j++) {
+    const voterAddress = voterAddresses[j];
+
+    // Transfer reward based on token type
+    if (poll.rewardTokenType === RewardTokenType.NATIVE_MASSA) {
+      transferCoins(new Address(voterAddress), rewardAmount);
+    } else {
+      transferTokenReward(voterAddress, rewardAmount);
+    }
+
+    // Record individual claim (same as manual claims)
+    const claimedKey = `${CLAIMED_PREFIX}${pollId}_${voterAddress}`;
+    Storage.set(claimedKey, "true");
+
+    // Emit claim event (same format as manual claims)
+    const tokenTypeStr = poll.rewardTokenType === RewardTokenType.CUSTOM_TOKEN ? 'MPOLLS tokens' : 'nanoMASSA';
+    generateEvent(`Reward claimed: ${rewardAmount.toString()} ${tokenTypeStr} by ${voterAddress} from poll ${pollId}`);
+
+    distributedCount++;
+    totalDistributed += rewardAmount;
+  }
+
+  // Update total rewards distributed counter
+  const totalRewardsDistributed = Storage.has(TOTAL_REWARDS_DISTRIBUTED_KEY)
+    ? u64.parse(Storage.get(TOTAL_REWARDS_DISTRIBUTED_KEY))
+    : 0;
+  Storage.set(TOTAL_REWARDS_DISTRIBUTED_KEY, (totalRewardsDistributed + totalDistributed).toString());
+
+  // If all voters have been paid, mark as fully distributed
+  if (batchSize >= voterAddresses.length) {
+    Storage.set(distributedKey, "true");
+    poll.rewardsDistributed = true;
+    Storage.set(pollKey, poll.serialize());
+    generateEvent(`✅ Poll ${pollId} - Auto-distribution completed: ${distributedCount} voters paid ${rewardAmount} each (total: ${totalDistributed})`);
+  } else {
+    // More voters to process - remove distributed voters from list
+    const remainingVoters = voterAddresses.slice(batchSize);
+    Storage.set(votersKey, remainingVoters.join("|"));
+    generateEvent(`📊 Poll ${pollId} - Batch distributed: ${distributedCount}/${voterAddresses.length} voters paid (${remainingVoters.length} remaining)`);
+
+    // Register another deferred call to process remaining voters (in 1 period)
+    registerDeferredDistribution(pollId, 1);
+  }
+}
+
+/**
  * Manual trigger for autonomous distribution (admin only, for testing/emergency)
  * @param args - Serialized arguments containing pollId
  */
@@ -1395,7 +1583,7 @@ export function claimReward(args: StaticArray<u8>): void {
  * Distribute rewards (MANUAL_PUSH mode) - creator triggers distribution to all voters
  * @param args - Serialized arguments containing pollId
  */
-export function distributeRewards(args: StaticArray<u8>): void {
+export function distributeRewardsManualPush(args: StaticArray<u8>): void {
   const argsObj = new Args(args);
   const pollId = argsObj.nextString().expect("Failed to deserialize poll ID");
 
@@ -1667,24 +1855,61 @@ export function closePoll(args: StaticArray<u8>): void {
   // Check if poll is not already closed/ended
   assert(poll.status == PollStatus.ACTIVE, "Poll is already closed or ended");
 
-  // If distribution time is provided, validate it
-  if (distributionTime > 0) {
+  // If distribution time is provided, validate it and register deferred call
+  if (distributionTime > 0 && poll.distributionType === DistributionType.AUTONOMOUS) {
     const currentTime: u64 = Context.timestamp();
-    assert(distributionTime > currentTime, "Distribution time must be in the future");
+    const currentPeriod = Context.currentPeriod();
+
+    // Calculate periods from now
+    // Massa period = 16 seconds = 16000 milliseconds
+    // First calculate time difference, then convert to periods
+    assert(distributionTime > currentTime, "Distribution time must be after current time");
+
+    const timeDifferenceMs = distributionTime - currentTime;
+
+    // Convert to periods: divide by 16000ms per period, round up to ensure we're in the future
+    // Add 15999 before dividing to round up (ceil operation)
+    const periodsFromNow: u64 = (timeDifferenceMs + 15999) / 16000;
+
+    // Validate timing constraints
+    const minPeriodsFromNow: u64 = 2; // Minimum 2 periods (32 seconds) in future
+    const maxPeriodsFromNow: u64 = 10000; // Maximum ~44 hours in future
+
+    generateEvent(`DEBUG: timeDifferenceMs=${timeDifferenceMs}, periodsFromNow=${periodsFromNow}`);
+
+    assert(
+      periodsFromNow >= minPeriodsFromNow,
+      `Distribution must be at least ${minPeriodsFromNow * 16} seconds (${minPeriodsFromNow} periods) in the future. Currently ${periodsFromNow} periods from now.`
+    );
+
+    assert(
+      periodsFromNow <= maxPeriodsFromNow,
+      `Distribution time is too far in the future (max ${maxPeriodsFromNow} periods / ~${(maxPeriodsFromNow * 16) / 3600} hours)`
+    );
 
     // Set the distribution time for auto-distribution
     poll.distributionTime = distributionTime;
 
-    generateEvent(`Poll ${pollId} closed with auto-distribution scheduled for timestamp ${distributionTime.toString()} (current: ${currentTime.toString()})`);
+    // Close poll first
+    poll.close();
+
+    // Save updated poll
+    Storage.set(pollKey, poll.serialize());
+
+    const targetPeriod = currentPeriod + periodsFromNow;
+    generateEvent(`Poll ${pollId} closed with auto-distribution scheduled for timestamp ${distributionTime.toString()} (current: ${currentTime.toString()}, target period: ${targetPeriod.toString()}, periods from now: ${periodsFromNow.toString()})`);
+
+    // Register deferred call for automatic distribution
+    registerDeferredDistribution(pollId, periodsFromNow);
   } else {
     generateEvent(`Poll ${pollId} closed without auto-distribution schedule`);
+
+    // Close poll
+    poll.close();
+
+    // Save updated poll
+    Storage.set(pollKey, poll.serialize());
   }
-
-  // Close poll
-  poll.close();
-
-  // Save updated poll
-  Storage.set(pollKey, poll.serialize());
 
   // Decrement active polls counter (poll status changed from ACTIVE to CLOSED)
   if (Storage.has(ACTIVE_POLLS_KEY)) {

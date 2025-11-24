@@ -20,6 +20,7 @@
         "check-pool": "tsx test/check-pool-status.js",
         "configure-token": "tsx test/configure-token-integration.js",
         "test:vote": "tsx test/vote-submission.js",
+        "check-distribution": "tsx src/check-distribution.ts",
         "clean": "rimraf build",
         "deploy": "npm run build && tsx src/deploy.ts",
         "deploy-fresh": "npm run build && tsx src/deploy-fresh.ts && npm run fund-contract",

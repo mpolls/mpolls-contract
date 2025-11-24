@@ -27,8 +27,8 @@ async function fundContract() {
     // Check account balance first
     console.log('💰 Skipping balance check for now');
 
-    // Fund the contract with 1 MASSA
-    const fundAmount = Mas.fromString('1.0');
+    // Fund the contract with 10 MASSA for deferred call operations
+    const fundAmount = Mas.fromString('10.0');
     console.log(`💸 Sending ${fundAmount} MASSA to contract...`);
 
     const transferResult = await provider.transfer(
